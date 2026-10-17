@@ -1,0 +1,40 @@
+﻿name: FuryMinions
+version: '1.0-SNAPSHOT'
+main: pl.furycraft.furyminions.FuryMinions
+author: 'SYMI'
+api-version: '26.2'
+description: 'Zaawansowany plugin na Miniony dla serwera FuryCraft - Paper 26.2, Java 25'
+
+libraries:
+  - org.mariadb.jdbc:mariadb-java-client:3.5.1
+  - com.zaxxer:HikariCP:5.1.0
+  - com.github.ben-manes.caffeine:caffeine:3.1.8
+
+dependencies:
+  server:
+    SuperiorSkyblock2:
+      load: BEFORE
+      required: true
+    Vault:
+      load: BEFORE
+      required: true
+    EssentialsX:
+      load: BEFORE
+      required: false
+
+permissions:
+  furyminions.*:
+    description: Wszystkie uprawnienia pluginu
+    children:
+      furyminions.use: true
+      furyminions.shop: true
+      furyminions.admin: true
+  furyminions.use:
+    description: Pozwala na używanie minionów
+    default: true
+  furyminions.shop:
+    description: Pozwala na dostęp do sklepu z minionami
+    default: true
+  furyminions.admin:
+    description: Komendy administracyjne
+    default: op
