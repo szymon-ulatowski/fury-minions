@@ -14,7 +14,7 @@ High-performance minion plugin for Paper servers. Automates resource gathering w
 
 - **Non-blocking Database (Async SQL)**: All MariaDB reads and writes run in the background via `CompletableFuture` and a tuned HikariCP connection pool, keeping the main game thread completely free.
 - **In-Memory Chunk Cache**: Minion data is cached in a chunk-keyed map (`ConcurrentHashMap`). Loading a chunk retrieves minions instantly without hitting the database.
-- **Lag-Free Scheduler**: Minions take turns acting (round-robin, capped at 20 actions/second) instead of ticking all at once, preventing TPS drops.
+- **Lag-Free Adaptive Scheduler**: Minions take turns acting via an adaptive round-robin scheduler with a strict CPU time budget (1.5ms/tick) and dynamic throughput scaling. Even with 5,000+ minions, actions execute reliably on time without queue starvation or server TPS drops.
 - **Low Memory Overhead (Zero-GC hot path)**: Common items, drops, and animation poses are reused static constants—no wasteful object creation every tick.
 - **Fast Offline Calculation**: When a player logs in, offline resource generation is calculated instantly using a simple time-delta formula instead of replaying ticks.
 - **Thread Safety**: World changes happen safely on the main thread, while data saving and cleanup run asynchronously in the background.

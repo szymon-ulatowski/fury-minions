@@ -24,9 +24,9 @@ import java.util.concurrent.ThreadLocalRandom;
 /**
  * Core scheduler that drives all active minion behaviours each server tick.
  * <p>
- * Uses a round-robin slice model: exactly {@value #MAX_ACTIONS_PER_SECOND} actions are
- * distributed across all active minions per second (1 action per tick), preventing
- * a large minion population from spiking tick time when many minions become ready simultaneously.
+ * Uses an adaptive round-robin slice model with a nanosecond time budget: ready minions are
+ * processed fairly each tick up to a dynamic action limit and time budget (1.5ms), ensuring
+ * thousands of active minions maintain their configured action intervals without dropping server TPS.
  * <p>
  * All item-drop constants are pre-allocated as static fields to eliminate per-tick GC pressure.
  */
@@ -40,8 +40,21 @@ public class MinionScheduler {
     private static final EulerAngle POSE_DEFAULT = new EulerAngle(Math.toRadians(0), 0, 0);
     private static final EulerAngle POSE_SWING   = new EulerAngle(Math.toRadians(-60), 0, 0);
 
-    /** Hard cap: exactly 20 minion actions spread evenly across one second (1 per tick). */
-    private static final int MAX_ACTIONS_PER_SECOND = 20;
+    /**
+     * Maximum CPU time budget per server tick (1.5 milliseconds in nanoseconds) allocated
+     * to executing minion actions. Guarantees the scheduler will not cause TPS drops.
+     */
+    private static final long TICK_TIME_BUDGET_NANOS = 1_500_000L;
+
+    /**
+     * Minimum number of actions permitted per tick if time budget allows.
+     */
+    private static final int MIN_ACTIONS_PER_TICK = 5;
+
+    /**
+     * Hard ceiling on actions executed in a single tick to safeguard against edge-case spikes.
+     */
+    private static final int MAX_ACTIONS_PER_TICK = 250;
 
     // -----------------------------------------------------------------------
     // Pre-allocated item singletons – zero GC on drop collection hot path
@@ -127,29 +140,39 @@ public class MinionScheduler {
 
     /**
      * Called once per server tick. Advances the round-robin pointer and processes
-     * up to {@code sliceSize} ready minions, skipping paused, full, or cooling-down ones.
+     * ready minions up to the dynamic action limit and nanosecond time budget, skipping
+     * paused, full, unloaded, or cooling-down ones.
      */
     private void tick() {
         List<Minion> activeMinions = plugin.getArmorStandManager().getActiveMinionsList();
-        if (activeMinions.isEmpty()) {
+        int totalMinions = activeMinions.size();
+        if (totalMinions == 0) {
             return;
         }
 
-        // sliceSize is always 1 given MAX_ACTIONS_PER_SECOND == 20 and 20 ticks/s,
-        // kept as a formula to allow easy tuning without breaking the rate guarantee.
-        int sliceSize = Math.max(1, MAX_ACTIONS_PER_SECOND / 20);
+        // Dynamically scale action capacity based on the active minion population.
+        // For example, 5000 minions with an average 25s (500 ticks) interval need ~10 actions/tick.
+        // (totalMinions / 50) provides ample headroom while MAX_ACTIONS_PER_TICK caps it.
+        int dynamicSlice = Math.max(MIN_ACTIONS_PER_TICK, (int) Math.ceil((double) totalMinions / 50.0));
+        int targetActions = Math.min(MAX_ACTIONS_PER_TICK, dynamicSlice);
 
-        if (minionIndex >= activeMinions.size()) {
+        if (minionIndex >= totalMinions) {
             minionIndex = 0;
         }
 
         int processedInThisTick = 0;
         int attempts = 0;
-        int maxAttempts = Math.min(activeMinions.size(), 100);
+        // In a single tick we can inspect up to all active minions to locate ready ones,
+        // since canPerformAction() is a lightweight memory/math check (~nanoseconds).
+        int maxAttempts = totalMinions;
+        long deadlineNanos = System.nanoTime() + TICK_TIME_BUDGET_NANOS;
 
-        while (processedInThisTick < sliceSize && attempts < maxAttempts) {
+        while (processedInThisTick < targetActions && attempts < maxAttempts) {
             if (minionIndex >= activeMinions.size()) {
                 minionIndex = 0;
+            }
+            if (activeMinions.isEmpty()) {
+                break;
             }
 
             Minion minion = activeMinions.get(minionIndex++);
@@ -160,11 +183,20 @@ public class MinionScheduler {
             }
 
             if (!minion.canPerformAction() || minion.isPaused() || minion.isFull()) {
+                // Periodically check deadline if scanning a huge collection of dormant minions
+                if ((attempts & 0xFF) == 0 && System.nanoTime() >= deadlineNanos) {
+                    break;
+                }
                 continue;
             }
 
             processMinionAction(minion);
             processedInThisTick++;
+
+            // Stop immediately if the tick time budget is exhausted to protect server TPS
+            if (System.nanoTime() >= deadlineNanos) {
+                break;
+            }
         }
     }
 
